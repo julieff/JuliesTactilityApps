@@ -1,0 +1,19 @@
+name: Main
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  Apps:
+    uses: TactilityProject/TactilityAppPublisher/.github/workflows/publish.yml@main
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    with:
+      target: pages
+      # HelloWorld targets every ESP32 platform, so its build fills the compiler cache for the others
+      warm_cache_app: HelloWorld
