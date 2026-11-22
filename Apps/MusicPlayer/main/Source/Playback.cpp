@@ -5,6 +5,7 @@
 #include <tactility/drivers/audio_stream.h>
 #include <tactility/esp_audio_simple_dec.h>
 #include <tactility/log.h>
+#include <tactility/memory.h>
 
 #include <cstdio>
 #include <cstring>
@@ -158,7 +159,16 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
     }
 
     std::vector<uint8_t> input(INPUT_BUFFER_SIZE);
-    std::vector<uint8_t> decoded(INITIAL_OUTPUT_BUFFER_SIZE);
+    size_t decodedSize = INITIAL_OUTPUT_BUFFER_SIZE;
+    uint8_t* decoded = static_cast<uint8_t*>(memory_alloc(decodedSize));
+    if (decoded == nullptr) {
+        esp_audio_simple_dec_close(decoder);
+        device_put(outputDevice);
+        fclose(file);
+        LOG_E(MUSIC_PLAYER_TAG, "Could not allocate %s decode output", formatName);
+        setStatus(context, "Out of memory");
+        return false;
+    }
     size_t inputLength = 0;
     bool endOfFile = false;
     bool success = true;
@@ -189,8 +199,8 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
         raw.len = static_cast<uint32_t>(inputLength);
         raw.eos = endOfFile;
         esp_audio_simple_dec_out_t frame {};
-        frame.buffer = decoded.data();
-        frame.len = static_cast<uint32_t>(decoded.size());
+        frame.buffer = decoded;
+        frame.len = static_cast<uint32_t>(decodedSize);
 
         const esp_audio_err_t result = esp_audio_simple_dec_process(decoder, &raw, &frame);
         if (result == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
@@ -201,7 +211,15 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
                 success = false;
                 break;
             }
-            decoded.resize(frame.needed_size);
+            uint8_t* resized = static_cast<uint8_t*>(memory_realloc(decoded, frame.needed_size));
+            if (resized == nullptr) {
+                LOG_E(MUSIC_PLAYER_TAG, "Could not allocate %s decode output", formatName);
+                setStatus(context, "Out of memory");
+                success = false;
+                break;
+            }
+            decoded = resized;
+            decodedSize = frame.needed_size;
             continue;
         }
         if (result != ESP_AUDIO_ERR_OK && result != ESP_AUDIO_ERR_CONTINUE && result != ESP_AUDIO_ERR_DATA_LACK) {
@@ -223,7 +241,7 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
             }
         }
 
-        if (frame.decoded_size > decoded.size()) {
+        if (frame.decoded_size > decodedSize) {
             LOG_E(MUSIC_PLAYER_TAG, "%s decoder returned an invalid output size", formatName);
             setStatus(context, (std::string(formatName) + " decode failed").c_str());
             success = false;
@@ -252,7 +270,7 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
                 byteRate = info.sample_rate * info.channel * (info.bits_per_sample / 8);
             }
             if (byteRate == 0 ||
-                !writeDecoded(stream, decoded.data(), frame.decoded_size, context, byteRate, &bytesPlayed)) {
+                !writeDecoded(stream, decoded, frame.decoded_size, context, byteRate, &bytesPlayed)) {
                 success = false;
                 break;
             }
@@ -283,6 +301,7 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
         }
     }
     esp_audio_simple_dec_close(decoder);
+    memory_free(decoded);
     device_put(outputDevice);
     fclose(file);
     return success && !shouldStop(context);
