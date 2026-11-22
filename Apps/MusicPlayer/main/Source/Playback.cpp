@@ -5,15 +5,53 @@
 #include <tactility/drivers/audio_stream.h>
 #include <tactility/esp_audio_simple_dec.h>
 #include <tactility/log.h>
+#include <tactility/memory.h>
 
 #include <cstdio>
 #include <cstring>
+#include <strings.h>
 #include <vector>
 
 namespace {
 
-constexpr size_t INPUT_BUFFER_SIZE = 8192;
-constexpr size_t OUTPUT_BUFFER_SIZE = 16384;
+esp_audio_simple_dec_type_t getDecoderType(const std::string& path) {
+    const size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos) {
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+    }
+
+    const std::string extension = path.substr(dot + 1);
+    if (strcasecmp(extension.c_str(), "mp3") == 0) {
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+    }
+    if (strcasecmp(extension.c_str(), "flac") == 0) {
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
+    }
+    if (strcasecmp(extension.c_str(), "wav") == 0) {
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_WAV;
+    }
+    if (strcasecmp(extension.c_str(), "m4a") == 0) {
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_M4A;
+    }
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+}
+
+const char* getFormatName(esp_audio_simple_dec_type_t decoderType) {
+    switch (decoderType) {
+        case ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC:
+            return "FLAC";
+        case ESP_AUDIO_SIMPLE_DEC_TYPE_WAV:
+            return "WAV";
+        case ESP_AUDIO_SIMPLE_DEC_TYPE_M4A:
+            return "M4A";
+        default:
+            return "MP3";
+    }
+}
+
+constexpr size_t INPUT_BUFFER_SIZE = 16384;
+constexpr size_t INITIAL_OUTPUT_BUFFER_SIZE = 32768;
+constexpr size_t MAX_OUTPUT_BUFFER_SIZE = 4 * 1024 * 1024;
 constexpr uint16_t PLAYBACK_TASK_STACK_BYTES = 8192;
 constexpr uint8_t PLAYBACK_TASK_PRIORITY = 8;
 constexpr char PLAYBACK_TASK_NAME[] = "music-player";
@@ -105,21 +143,32 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
         return false;
     }
 
+    const esp_audio_simple_dec_type_t decoderType = getDecoderType(track.path);
+    const char* formatName = getFormatName(decoderType);
     esp_audio_simple_dec_cfg_t decoderConfig {};
-    decoderConfig.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+    decoderConfig.dec_type = decoderType;
     decoderConfig.use_frame_dec = false;
     esp_audio_simple_dec_handle_t decoder = nullptr;
     const esp_audio_err_t decoderError = esp_audio_simple_dec_open(&decoderConfig, &decoder);
     if (decoderError != ESP_AUDIO_ERR_OK || decoder == nullptr) {
         device_put(outputDevice);
         fclose(file);
-        LOG_E(MUSIC_PLAYER_TAG, "MP3 decoder open failed: %d", decoderError);
-        setStatus(context, "MP3 decoder unavailable");
+        LOG_E(MUSIC_PLAYER_TAG, "%s decoder open failed: %d", formatName, decoderError);
+        setStatus(context, (std::string(formatName) + " decoder unavailable").c_str());
         return false;
     }
 
     std::vector<uint8_t> input(INPUT_BUFFER_SIZE);
-    std::vector<uint8_t> decoded(OUTPUT_BUFFER_SIZE);
+    size_t decodedSize = INITIAL_OUTPUT_BUFFER_SIZE;
+    uint8_t* decoded = static_cast<uint8_t*>(memory_alloc(decodedSize));
+    if (decoded == nullptr) {
+        esp_audio_simple_dec_close(decoder);
+        device_put(outputDevice);
+        fclose(file);
+        LOG_E(MUSIC_PLAYER_TAG, "Could not allocate %s decode output", formatName);
+        setStatus(context, "Out of memory");
+        return false;
+    }
     size_t inputLength = 0;
     bool endOfFile = false;
     bool success = true;
@@ -150,19 +199,38 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
         raw.len = static_cast<uint32_t>(inputLength);
         raw.eos = endOfFile;
         esp_audio_simple_dec_out_t frame {};
-        frame.buffer = decoded.data();
-        frame.len = static_cast<uint32_t>(decoded.size());
+        frame.buffer = decoded;
+        frame.len = static_cast<uint32_t>(decodedSize);
 
         const esp_audio_err_t result = esp_audio_simple_dec_process(decoder, &raw, &frame);
+        if (result == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+            if (frame.needed_size == 0 || frame.needed_size > MAX_OUTPUT_BUFFER_SIZE) {
+                LOG_E(MUSIC_PLAYER_TAG, "%s decoder requested an invalid output size: %u", formatName,
+                      frame.needed_size);
+                setStatus(context, (std::string(formatName) + " decode failed").c_str());
+                success = false;
+                break;
+            }
+            uint8_t* resized = static_cast<uint8_t*>(memory_realloc(decoded, frame.needed_size));
+            if (resized == nullptr) {
+                LOG_E(MUSIC_PLAYER_TAG, "Could not allocate %s decode output", formatName);
+                setStatus(context, "Out of memory");
+                success = false;
+                break;
+            }
+            decoded = resized;
+            decodedSize = frame.needed_size;
+            continue;
+        }
         if (result != ESP_AUDIO_ERR_OK && result != ESP_AUDIO_ERR_CONTINUE && result != ESP_AUDIO_ERR_DATA_LACK) {
-            LOG_E(MUSIC_PLAYER_TAG, "MP3 decode failed: %d", result);
-            setStatus(context, "MP3 decode failed");
+            LOG_E(MUSIC_PLAYER_TAG, "%s decode failed: %d", formatName, result);
+            setStatus(context, (std::string(formatName) + " decode failed").c_str());
             success = false;
             break;
         }
         if (raw.consumed > inputLength) {
-            LOG_E(MUSIC_PLAYER_TAG, "MP3 decoder consumed beyond input");
-            setStatus(context, "MP3 decode failed");
+            LOG_E(MUSIC_PLAYER_TAG, "%s decoder consumed beyond input", formatName);
+            setStatus(context, (std::string(formatName) + " decode failed").c_str());
             success = false;
             break;
         }
@@ -173,9 +241,9 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
             }
         }
 
-        if (frame.decoded_size > decoded.size()) {
-            LOG_E(MUSIC_PLAYER_TAG, "MP3 decoder returned an invalid output size");
-            setStatus(context, "MP3 decode failed");
+        if (frame.decoded_size > decodedSize) {
+            LOG_E(MUSIC_PLAYER_TAG, "%s decoder returned an invalid output size", formatName);
+            setStatus(context, (std::string(formatName) + " decode failed").c_str());
             success = false;
             break;
         }
@@ -183,7 +251,7 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
             esp_audio_simple_dec_info_t info {};
             if (esp_audio_simple_dec_get_info(decoder, &info) != ESP_AUDIO_ERR_OK || info.sample_rate == 0 ||
                 info.channel == 0 || info.bits_per_sample == 0) {
-                setStatus(context, "Could not read MP3 format");
+                setStatus(context, (std::string("Could not read ") + formatName + " format").c_str());
                 success = false;
                 break;
             }
@@ -202,13 +270,13 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
                 byteRate = info.sample_rate * info.channel * (info.bits_per_sample / 8);
             }
             if (byteRate == 0 ||
-                !writeDecoded(stream, decoded.data(), frame.decoded_size, context, byteRate, &bytesPlayed)) {
+                !writeDecoded(stream, decoded, frame.decoded_size, context, byteRate, &bytesPlayed)) {
                 success = false;
                 break;
             }
         } else if (raw.consumed == 0 && inputLength == input.size() && !endOfFile) {
-            LOG_E(MUSIC_PLAYER_TAG, "MP3 decoder cannot consume input buffer");
-            setStatus(context, "MP3 decode stalled");
+            LOG_E(MUSIC_PLAYER_TAG, "%s decoder cannot consume input buffer", formatName);
+            setStatus(context, (std::string(formatName) + " decode stalled").c_str());
             success = false;
             break;
         } else if (raw.consumed == 0 && frame.decoded_size == 0 && !endOfFile) {
@@ -233,6 +301,7 @@ bool playTrack(MusicPlayerContext* context, const MusicTrack& track) {
         }
     }
     esp_audio_simple_dec_close(decoder);
+    memory_free(decoded);
     device_put(outputDevice);
     fclose(file);
     return success && !shouldStop(context);

@@ -16,11 +16,15 @@
 
 namespace {
 
-bool hasMp3Extension(const char* name) {
-    const size_t length = strlen(name);
-    return length >= 4 && name[length - 4] == '.' && tolower(static_cast<unsigned char>(name[length - 3])) == 'm' &&
-           tolower(static_cast<unsigned char>(name[length - 2])) == 'p' &&
-           tolower(static_cast<unsigned char>(name[length - 1])) == '3';
+bool hasSupportedAudioExtension(const char* name) {
+    const char* dot = strrchr(name, '.');
+    if (dot == nullptr) {
+        return false;
+    }
+
+    const char* extension = dot + 1;
+    return strcasecmp(extension, "mp3") == 0 || strcasecmp(extension, "flac") == 0 ||
+           strcasecmp(extension, "wav") == 0 || strcasecmp(extension, "m4a") == 0;
 }
 
 uint32_t readBigEndian32(const uint8_t* bytes) {
@@ -332,7 +336,7 @@ void musicPlayerScanFolder(MusicPlayerContext* context, const std::string& path)
             entries.push_back({name, fullPath, true});
             continue;
         }
-        if (!S_ISREG(status.st_mode) || !hasMp3Extension(entry->d_name)) {
+        if (!S_ISREG(status.st_mode) || !hasSupportedAudioExtension(entry->d_name)) {
             continue;
         }
 
@@ -363,6 +367,6 @@ void musicPlayerScanFolder(MusicPlayerContext* context, const std::string& path)
     }
     {
         std::lock_guard lock(context->statusMutex);
-        context->statusText = noTracks ? "No MP3 files found" : "Ready";
+        context->statusText = noTracks ? "No supported audio files found" : "Ready";
     }
 }
