@@ -305,7 +305,7 @@ void renderTrackList(MusicPlayerContext* context) {
     }
     if (context->browserEntries.empty()) {
         auto* emptyLabel = lv_label_create(context->browserList);
-        lv_label_set_text(emptyLabel, "No folders or MP3 files");
+        lv_label_set_text(emptyLabel, "No folders or supported audio files");
         return;
     }
 
@@ -521,16 +521,6 @@ void createMiniPlayer(lv_obj_t* parent, MusicPlayerContext* context) {
     lv_obj_add_flag(miniPlayer, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(miniPlayer, onMiniPlayerClicked, LV_EVENT_CLICKED, context);
 
-    auto* artwork = lv_obj_create(miniPlayer);
-    lv_obj_set_size(artwork, LV_DPX(46), LV_DPX(46));
-    lv_obj_set_style_bg_color(artwork, lv_color_make(105, 50, 165), LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(artwork, LV_OPA_COVER, LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(artwork, 0, LV_STATE_DEFAULT);
-    auto* artworkLabel = lv_label_create(artwork);
-    lv_label_set_text(artworkLabel, LV_SYMBOL_AUDIO);
-    lv_obj_set_style_text_color(artworkLabel, lv_color_white(), LV_STATE_DEFAULT);
-    lv_obj_center(artworkLabel);
-
     auto* metadata = lv_obj_create(miniPlayer);
     lv_obj_remove_style_all(metadata);
     lv_obj_set_flex_grow(metadata, 1);
@@ -632,17 +622,6 @@ void createWidgetsImpl(lv_obj_t* parent, MusicPlayerContext* context) {
     auto* playerCard = createCard(content);
     lv_obj_set_flex_grow(playerCard, 1);
     lv_obj_set_flex_align(playerCard, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    auto* artwork = lv_obj_create(playerCard);
-    lv_obj_set_size(artwork, LV_DPX(120), LV_DPX(120));
-    lv_obj_set_style_bg_color(artwork, lv_color_make(105, 50, 165), LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(artwork, LV_OPA_COVER, LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(artwork, 0, LV_STATE_DEFAULT);
-    auto* artworkLabel = lv_label_create(artwork);
-    lv_label_set_text(artworkLabel, LV_SYMBOL_AUDIO);
-    lv_obj_set_style_text_color(artworkLabel, lv_color_white(), LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(artworkLabel, lvgl_get_text_font(FONT_SIZE_LARGE), LV_STATE_DEFAULT);
-    lv_obj_center(artworkLabel);
-
     context->trackTitleLabel = lv_label_create(playerCard);
     lv_obj_set_width(context->trackTitleLabel, LV_PCT(100));
     lv_obj_set_style_text_font(context->trackTitleLabel, lvgl_get_text_font(FONT_SIZE_LARGE), LV_STATE_DEFAULT);
