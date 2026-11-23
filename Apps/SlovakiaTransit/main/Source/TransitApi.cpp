@@ -44,6 +44,16 @@ void optional(std::string& output, const cJSON* object, const char* key, const c
     }
 }
 
+void optionalNonzeroNumber(std::string& output, const cJSON* object, const char* key, const char* prefix) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (cJSON_IsNumber(item) && item->valueint != 0) {
+        char value[24];
+        snprintf(value, sizeof(value), "%d", item->valueint);
+        output += prefix;
+        output += value;
+    }
+}
+
 struct Response {
     std::string body;
     bool tooLarge = false;
@@ -122,64 +132,77 @@ TransitResult transitParse(const TransitRequest& request, const char* json) {
         } else if (cJSON_GetArraySize(connections) == 0) {
             result.message = "No connections found.";
         } else {
-            result.message = "Verify times and transfers on CP.sk; this unofficial service can make mistakes.\n";
+            result.message = "Verify times and transfers on CP.sk; this unofficial service can make mistakes.";
             const cJSON* connection;
-            int number = 0;
             cJSON_ArrayForEach(connection, connections) {
                 if (!cJSON_IsObject(connection)) {
                     result.message = "Unexpected connection response.";
+                    result.connections.clear();
                     break;
                 }
-                char heading[32];
-                snprintf(heading, sizeof(heading), "\nConnection %d: ", ++number);
-                result.message += heading;
-                result.message += text(connection, "date");
-                result.message += "\n";
-                result.message += text(connection, "departure");
-                result.message += " - ";
-                result.message += text(connection, "arrival");
-                optional(result.message, connection, "duration", "  ");
-                result.message += "\n";
+                result.connections.emplace_back();
+                TransitConnection& item = result.connections.back();
+                item.summary += text(connection, "date");
+                item.summary += "\n";
+                item.summary += text(connection, "departure");
+                item.summary += " - ";
+                item.summary += text(connection, "arrival");
+                optional(item.summary, connection, "duration", "  ");
+                optionalNonzeroNumber(item.summary, connection, "changes", "\nChanges: ");
+                item.details = item.summary + "\n";
+                std::string& details = item.details;
 
                 const cJSON* legs = cJSON_GetObjectItemCaseSensitive(connection, "legs");
                 if (!cJSON_IsArray(legs) || cJSON_GetArraySize(legs) == 0) {
-                    result.message += "Leg details unavailable.\n";
-                    continue;
-                }
-                const cJSON* leg;
-                cJSON_ArrayForEach(leg, legs) {
-                    if (!cJSON_IsObject(leg)) {
-                        result.message += "Leg details unavailable.\n";
-                        continue;
+                    details += "Leg details unavailable.\n";
+                } else {
+                    const cJSON* leg;
+                    cJSON_ArrayForEach(leg, legs) {
+                        if (!cJSON_IsObject(leg)) {
+                            details += "Leg details unavailable.\n";
+                            continue;
+                        }
+                        item.summary += "\n";
+                        item.summary += text(leg, "line");
+                        details += "\n";
+                        details += text(leg, "line");
+                        optional(details, leg, "type", " (");
+                        if (*text(leg, "type", "")) details += ")";
+                        optional(details, leg, "direction", " toward ");
+                        details += "\n";
+                        details += text(leg, "dep");
+                        details += "  ";
+                        details += text(leg, "from_stop");
+                        optional(details, leg, "from_platform", "  platform ");
+                        details += "\n";
+                        details += text(leg, "arr");
+                        details += "  ";
+                        details += text(leg, "to_stop");
+                        optional(details, leg, "to_platform", "  platform ");
+                        details += "\n";
                     }
-                    result.message += "\n";
-                    result.message += text(leg, "line");
-                    optional(result.message, leg, "type", " (");
-                    if (*text(leg, "type", "")) result.message += ")";
-                    optional(result.message, leg, "direction", " toward ");
-                    result.message += "\n";
-                    result.message += text(leg, "dep");
-                    result.message += "  ";
-                    result.message += text(leg, "from_stop");
-                    optional(result.message, leg, "from_platform", "  platform ");
-                    result.message += "\n";
-                    result.message += text(leg, "arr");
-                    result.message += "  ";
-                    result.message += text(leg, "to_stop");
-                    optional(result.message, leg, "to_platform", "  platform ");
-                    result.message += "\n";
                 }
                 const cJSON* transfers = cJSON_GetObjectItemCaseSensitive(connection, "transfers");
                 if (cJSON_IsArray(transfers)) {
                     const cJSON* transfer;
                     cJSON_ArrayForEach(transfer, transfers) {
-                        if (!cJSON_IsObject(transfer)) continue;
-                        result.message += "\nTransfer: ";
-                        result.message += text(transfer, "stop");
-                        optional(result.message, transfer, "board_stop", " -> ");
-                        optional(result.message, transfer, "walk", "  walk: ");
-                        optional(result.message, transfer, "wait", "  wait: ");
-                        result.message += "\n";
+                        if (!cJSON_IsObject(transfer)) {
+                            details += "\nTransfer details unavailable.\n";
+                            continue;
+                        }
+                        details += "\nTransfer: ";
+                        details += text(transfer, "stop");
+                        optional(details, transfer, "platform", "\nAlighting platform: ");
+                        optional(details, transfer, "arrival", "\nArrival: ");
+                        optional(details, transfer, "from_line", "\nFrom line: ");
+                        optional(details, transfer, "board_stop", "\nBoarding stop: ");
+                        optional(details, transfer, "board_platform", "\nBoarding platform: ");
+                        optional(details, transfer, "departure", "\nDeparture: ");
+                        optional(details, transfer, "to_line", "\nTo line: ");
+                        optional(details, transfer, "to_direction", "\nDirection: ");
+                        optional(details, transfer, "walk", "\nWalk: ");
+                        optional(details, transfer, "wait", "\nWait: ");
+                        details += "\n";
                     }
                 }
             }
@@ -200,19 +223,19 @@ TransitResult transitFetch(const TransitRequest& request) {
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
     config.crt_bundle_attach = esp_crt_bundle_attach;
 #else
-    return {"This firmware has no HTTPS certificate bundle.", {}};
+    return {"This firmware has no HTTPS certificate bundle.", {}, {}};
 #endif
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) return {"Could not create HTTPS client.", {}};
+    if (!client) return {"Could not create HTTPS client.", {}, {}};
     esp_err_t error = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
-    if (response.tooLarge) return {"Service response exceeds 96 KB.", {}};
-    if (error != ESP_OK) return {"Request failed. Check Wi-Fi, device time and HTTPS certificates.", {}};
+    if (response.tooLarge) return {"Service response exceeds 96 KB.", {}, {}};
+    if (error != ESP_OK) return {"Request failed. Check Wi-Fi, device time and HTTPS certificates.", {}, {}};
     if (status < 200 || status >= 300) {
         char message[100];
         snprintf(message, sizeof(message), "Service returned HTTP %d. Check your search and try again.", status);
-        return {message, {}};
+        return {message, {}, {}};
     }
     return transitParse(request, response.body.c_str());
 }
