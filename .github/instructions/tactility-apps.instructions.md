@@ -16,5 +16,8 @@ applyTo: "Apps/**"
   or network operations on the LVGL thread or while holding the LVGL lock.
 - Make layouts adapt to screen sizes and keep interactive controls usable with
   both touch and keyboard or directional input.
+- Prefer a Tactility widget when one suits the purpose. For example, use a
+  [Card](https://docs.tactilityproject.org/main/app-development/ui-widgets/#card)
+  to make grouped content stand out from the window background.
 - Handle service and resource errors explicitly. Document external services,
   connectivity requirements, and important limitations.

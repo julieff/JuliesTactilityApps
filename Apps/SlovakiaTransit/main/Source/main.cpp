@@ -4,6 +4,7 @@
 #include <app/scheduler.h>
 #include <lvgl/fonts.h>
 #include <lvgl/lvgl.h>
+#include <lvgl/widgets/card.h>
 #include <lvgl/widgets/text_button.h>
 #include <lvgl/widgets/toolbar.h>
 #include <lvgl_window_manager/window_manager.h>
@@ -14,7 +15,7 @@
 
 namespace {
 
-enum class Page { Search, Results };
+enum class Page { Search, Results, Details };
 
 struct Context {
     AppInstanceId appId = 0;
@@ -22,9 +23,10 @@ struct Context {
     uint32_t requestBit = 0;
     TransitRequest input {RequestKind::Connections, "", "", "", ""};
     TransitRequest pending {RequestKind::Connections, "", "", "", ""};
-    TransitResult result {"Enter places and search, or find exact stops.", {}};
+    TransitResult result {"Enter places and search, or find exact stops.", {}, {}};
     RequestKind stopTarget = RequestKind::FromStops;
     Page page = Page::Search;
+    size_t selectedConnection = 0;
     bool busy = false;
     bool hasResult = false;
     lv_obj_t* root = nullptr;
@@ -39,11 +41,18 @@ struct Context {
     lv_obj_t* viewResults = nullptr;
     lv_obj_t* formStatus = nullptr;
     lv_obj_t* message = nullptr;
+    lv_obj_t* connections = nullptr;
     lv_obj_t* stops = nullptr;
 };
 
 void renderResult(Context* ctx);
 void createWidgets(lv_obj_t* parent, void* userData);
+
+lv_obj_t* createButton(lv_obj_t* parent) {
+    lv_obj_t* button = lv_button_create(parent);
+    lv_obj_set_style_radius(button, LV_DPX(8), LV_STATE_DEFAULT);
+    return button;
+}
 
 void onPageTimer(lv_timer_t* timer) {
     auto* ctx = static_cast<Context*>(lv_timer_get_user_data(timer));
@@ -82,6 +91,14 @@ void onStopSelected(lv_event_t* event) {
     showPage(ctx, Page::Search);
 }
 
+void onConnectionSelected(lv_event_t* event) {
+    auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
+    uint32_t index = lv_obj_get_index(lv_event_get_target_obj(event));
+    if (index >= ctx->result.connections.size()) return;
+    ctx->selectedConnection = index;
+    showPage(ctx, Page::Details);
+}
+
 void renderResult(Context* ctx) {
     if (ctx->formStatus) {
         lv_label_set_text(ctx->formStatus, ctx->busy ? "Searching..." :
@@ -91,11 +108,21 @@ void renderResult(Context* ctx) {
     if (ctx->findTo) lv_obj_set_state(ctx->findTo, LV_STATE_DISABLED, ctx->busy);
     if (ctx->search) lv_obj_set_state(ctx->search, LV_STATE_DISABLED, ctx->busy);
     if (ctx->viewResults) lv_obj_set_hidden(ctx->viewResults, !ctx->hasResult);
-    if (!ctx->message || !ctx->stops) return;
+    if (!ctx->message || !ctx->connections || !ctx->stops) return;
     lv_label_set_text(ctx->message, ctx->result.message.c_str());
+    lv_obj_clean(ctx->connections);
+    for (const TransitConnection& connection : ctx->result.connections) {
+        lv_obj_t* button = createButton(ctx->connections);
+        lv_obj_set_size(button, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_t* label = lv_label_create(button);
+        lv_obj_set_width(label, LV_PCT(100));
+        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_WRAP);
+        lv_label_set_text(label, connection.summary.c_str());
+        lv_obj_add_event_cb(button, onConnectionSelected, LV_EVENT_CLICKED, ctx);
+    }
     lv_obj_clean(ctx->stops);
     for (const std::string& stop : ctx->result.stops) {
-        lv_obj_t* button = lv_button_create(ctx->stops);
+        lv_obj_t* button = createButton(ctx->stops);
         lv_obj_set_width(button, LV_PCT(100));
         lv_obj_t* label = lv_label_create(button);
         lv_label_set_text(label, stop.c_str());
@@ -110,15 +137,15 @@ void startRequest(Context* ctx, RequestKind kind) {
     ctx->stopTarget = kind;
     ctx->hasResult = true;
     if (kind == RequestKind::Connections && (ctx->input.from.empty() || ctx->input.to.empty())) {
-        ctx->result = {"Enter both origin and destination.", {}};
+        ctx->result = {"Enter both origin and destination.", {}, {}};
     } else if (kind != RequestKind::Connections &&
                (kind == RequestKind::FromStops ? ctx->input.from : ctx->input.to).size() < 2) {
-        ctx->result = {"Enter at least two characters to find stops.", {}};
+        ctx->result = {"Enter at least two characters to find stops.", {}, {}};
     } else {
         ctx->pending = ctx->input;
         ctx->pending.kind = kind;
         ctx->busy = true;
-        ctx->result = {"Searching...", {}};
+        ctx->result = {"Searching...", {}, {}};
         if (task_event_group_signal(&ctx->events, ctx->requestBit) != ERROR_NONE) {
             ctx->busy = false;
             ctx->result.message = "Could not start the search.";
@@ -146,7 +173,8 @@ void onClose(lv_event_t* event) {
 }
 
 void onBack(lv_event_t* event) {
-    showPage(static_cast<Context*>(lv_event_get_user_data(event)), Page::Search);
+    auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
+    showPage(ctx, ctx->page == Page::Details ? Page::Results : Page::Search);
 }
 
 void onViewResults(lv_event_t* event) {
@@ -165,7 +193,7 @@ lv_obj_t* addField(lv_obj_t* parent, const char* placeholder, const std::string&
 }
 
 lv_obj_t* addButton(lv_obj_t* parent, const char* text, lv_event_cb_t callback, Context* ctx) {
-    lv_obj_t* button = lv_button_create(parent);
+    lv_obj_t* button = createButton(parent);
     lv_obj_set_width(button, LV_PCT(100));
     lv_label_set_text(lv_label_create(button), text);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, ctx);
@@ -186,6 +214,7 @@ void addStopRow(lv_obj_t* parent, const char* placeholder, const std::string& va
     lv_obj_set_width(*field, 0);
     lv_obj_set_flex_grow(*field, 1);
     *button = lvgl_text_button_create(row);
+    lv_obj_set_style_radius(*button, LV_DPX(8), LV_STATE_DEFAULT);
     lv_obj_set_size(*button, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_left(*button, LV_DPX(2), LV_STATE_DEFAULT);
     lv_obj_set_style_pad_right(*button, LV_DPX(2), LV_STATE_DEFAULT);
@@ -206,6 +235,7 @@ void clearWidgetPointers(Context* ctx) {
     ctx->viewResults = nullptr;
     ctx->formStatus = nullptr;
     ctx->message = nullptr;
+    ctx->connections = nullptr;
     ctx->stops = nullptr;
 }
 
@@ -216,7 +246,9 @@ void createWidgets(lv_obj_t* parent, void* userData) {
     lv_obj_clean(parent);
     lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollable(parent, false);
-    lv_obj_t* toolbar = lvgl_toolbar_create(parent, ctx->page == Page::Search ? "Slovakia Transit" : "Results");
+    const char* title = ctx->page == Page::Search ? "Slovakia Transit" :
+                        ctx->page == Page::Results ? "Results" : "Connection details";
+    lv_obj_t* toolbar = lvgl_toolbar_create(parent, title);
     lv_obj_set_width(toolbar, LV_PCT(100));
     lvgl_toolbar_set_nav_action(toolbar, ctx->page == Page::Search ? LV_SYMBOL_CLOSE : LV_SYMBOL_LEFT,
                                ctx->page == Page::Search ? onClose : onBack, ctx);
@@ -241,18 +273,39 @@ void createWidgets(lv_obj_t* parent, void* userData) {
         lv_obj_set_width(ctx->formStatus, LV_PCT(100));
         lv_label_set_long_mode(ctx->formStatus, LV_LABEL_LONG_MODE_WRAP);
         ctx->viewResults = addButton(content, "View results", onViewResults, ctx);
-    } else {
+    } else if (ctx->page == Page::Results) {
         lv_obj_add_flag(content, LV_OBJ_FLAG_CLICKABLE);
         lv_group_t* group = lv_group_get_default();
         if (group) lv_group_add_obj(group, content);
         ctx->message = lv_label_create(content);
         lv_obj_set_width(ctx->message, LV_PCT(100));
         lv_label_set_long_mode(ctx->message, LV_LABEL_LONG_MODE_WRAP);
+        ctx->connections = lv_obj_create(content);
+        lv_obj_remove_style_all(ctx->connections);
+        lv_obj_set_size(ctx->connections, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(ctx->connections, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(ctx->connections, LV_DPX(4), LV_STATE_DEFAULT);
+        lv_obj_set_scrollable(ctx->connections, false);
         ctx->stops = lv_obj_create(content);
         lv_obj_remove_style_all(ctx->stops);
         lv_obj_set_width(ctx->stops, LV_PCT(100));
         lv_obj_set_height(ctx->stops, LV_SIZE_CONTENT);
         lv_obj_set_flex_flow(ctx->stops, LV_FLEX_FLOW_COLUMN);
+    } else {
+        lv_obj_add_flag(content, LV_OBJ_FLAG_CLICKABLE);
+        lv_group_t* group = lv_group_get_default();
+        if (group) lv_group_add_obj(group, content);
+        lv_obj_t* card = lvgl_card_create(content);
+        lv_obj_set_size(card, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_scrollable(card, false);
+        lv_obj_t* details = lv_label_create(card);
+        lv_obj_set_width(details, LV_PCT(100));
+        lv_label_set_long_mode(details, LV_LABEL_LONG_MODE_WRAP);
+        if (ctx->selectedConnection < ctx->result.connections.size()) {
+            lv_label_set_text(details, ctx->result.connections[ctx->selectedConnection].details.c_str());
+        } else {
+            lv_label_set_text(details, "Connection details are unavailable.");
+        }
     }
     renderResult(ctx);
 }

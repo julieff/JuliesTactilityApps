@@ -3,10 +3,13 @@
 Search Slovak bus and train connections together. Enter an origin and destination,
 or use the stop-search buttons and select an exact stop. Date (`YYYY-MM-DD`)
 and time (`HH:MM`) are optional; when omitted, the service uses its current
-date and time. Results include each leg, available platforms and transfer details.
-Stop suggestions and connections appear on a separate results page. Select a
-stop to return to the search form, or use the back button to change the search.
-After going back, the last results can be reopened from the form.
+date and time. Stop suggestions and connections appear on a separate results
+page. Select a connection to see its lines, number of changes, legs and available
+transfer details, including platforms, times, directions and walking; back
+returns to the results. The service does not provide intermediate
+stops, distances or vehicle amenities. Select a suggested stop to return to the
+search form, or use back to change the search. After going back, the last
+results can be reopened from the form.
 
 The app requires Wi-Fi, a correctly set device clock and firmware with the HTTPS
 certificate bundle. It sends the entered places and optional date/time to

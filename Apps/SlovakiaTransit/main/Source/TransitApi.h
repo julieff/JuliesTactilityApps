@@ -13,9 +13,15 @@ struct TransitRequest {
     std::string time;
 };
 
+struct TransitConnection {
+    std::string summary;
+    std::string details;
+};
+
 struct TransitResult {
     std::string message;
     std::vector<std::string> stops;
+    std::vector<TransitConnection> connections;
 };
 
 std::string transitUrl(const TransitRequest& request);
