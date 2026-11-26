@@ -44,15 +44,17 @@ void apply(Target& target, int32_t brightness, bool on) {
 
 void restore(Target& target, int32_t configured, bool on) {
     if (!on) {
-        apply(target, configured, false);
-        target.dimmed = false;
+        int32_t ignored = 0;
+        if (backlight_shared::turnOff(target.name, &ignored)) {
+            target.dimmed = false;
+        }
         return;
     }
     const int32_t brightness = configured != backlight_shared::BRIGHTNESS_UNSET ? configured : target.previous;
-    if (brightness != backlight_shared::BRIGHTNESS_UNSET) {
-        backlight_shared::setBrightness(target.name, brightness);
+    if (brightness != backlight_shared::BRIGHTNESS_UNSET &&
+        backlight_shared::setBrightness(target.name, brightness)) {
+        target.dimmed = false;
     }
-    target.dimmed = false;
 }
 
 void update(Target& target, bool enabled, bool idle, bool active, int32_t configured, bool on) {

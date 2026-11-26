@@ -133,9 +133,11 @@ inline bool turnOff(const char* name, int32_t* out_previous) {
         return false;
     }
     uint8_t current = 0;
-    if (backlight_get_brightness(device, &current) == ERROR_NONE) {
-        *out_previous = current;
+    if (backlight_get_brightness(device, &current) != ERROR_NONE) {
+        device_put(device);
+        return false;
     }
+    *out_previous = current;
     const bool ok = backlight_set_brightness(device, backlight_get_min_brightness(device)) == ERROR_NONE;
     device_put(device);
     return ok;

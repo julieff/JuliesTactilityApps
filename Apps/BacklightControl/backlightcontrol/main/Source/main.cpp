@@ -313,7 +313,7 @@ void syncIdleService(int32_t timeoutSeconds) {
     }
 }
 
-void save(Context* context) {
+bool save(Context* context) {
     backlight_shared::Settings settings;
     settings.displayBrightness = context->displayBrightness.load();
     settings.keyboardBrightness = context->keyboardBrightness.load();
@@ -324,8 +324,23 @@ void save(Context* context) {
     settings.idleKeyboard = context->idleKeyboard.load();
     if (!backlight_shared::saveSettings(settings)) {
         LOG_E(TAG, "Could not save settings");
+        return false;
     }
     syncIdleService(settings.timeoutSeconds);
+    return true;
+}
+
+void applySavedBacklight(const char* name, int32_t brightness, bool on, const char* label) {
+    bool applied = false;
+    if (on) {
+        applied = brightness == BRIGHTNESS_UNSET || backlight_shared::setBrightness(name, brightness);
+    } else {
+        int32_t ignored = 0;
+        applied = backlight_shared::turnOff(name, &ignored);
+    }
+    if (!applied) {
+        LOG_E(TAG, "Could not apply saved %s backlight settings", label);
+    }
 }
 
 }
@@ -351,6 +366,10 @@ int main(int argc, char* argv[]) {
     context.idleKeyboard.store(settings.idleKeyboard);
     context.display = probe(backlight_shared::DISPLAY_BACKLIGHT_NAME);
     context.keyboard = probe(backlight_shared::KEYBOARD_BACKLIGHT_NAME);
+    applySavedBacklight(backlight_shared::DISPLAY_BACKLIGHT_NAME, settings.displayBrightness, settings.displayOn,
+                        "display");
+    applySavedBacklight(backlight_shared::KEYBOARD_BACKLIGHT_NAME, settings.keyboardBrightness, settings.keyboardOn,
+                        "keyboard");
     syncIdleService(settings.timeoutSeconds);
 
     WindowId window = window_manager_create_ext(context.appInstanceId, createWidgets, destroyWidgets, &context);
@@ -371,13 +390,19 @@ int main(int argc, char* argv[]) {
         // Save once the user stopped dragging, to keep flash writes down
         if (context.dirty.load() && xTaskGetTickCount() - context.lastChange.load() >= SAVE_DEBOUNCE) {
             context.dirty.store(false);
-            save(&context);
+            if (!save(&context)) {
+                context.lastChange.store(xTaskGetTickCount());
+                context.dirty.store(true);
+            }
         }
     }
 
     window_manager_remove(window);
     if (context.dirty.load()) {
-        save(&context);
+        context.dirty.store(false);
+        if (!save(&context)) {
+            context.dirty.store(true);
+        }
     }
     check(app_event_unsubscribe(&subscription) == ERROR_NONE);
     task_event_group_release_bit(&context.eventGroup, context.wakeBit);
