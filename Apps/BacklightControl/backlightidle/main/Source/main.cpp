@@ -34,9 +34,8 @@ uint32_t getInactiveMs() {
 }
 
 void apply(Target& target, int32_t brightness, bool on) {
-    int32_t ignored = 0;
     if (!on) {
-        backlight_shared::turnOff(target.name, &ignored);
+        backlight_shared::turnOff(target.name);
     } else if (brightness != backlight_shared::BRIGHTNESS_UNSET) {
         backlight_shared::setBrightness(target.name, brightness);
     }
@@ -44,8 +43,7 @@ void apply(Target& target, int32_t brightness, bool on) {
 
 void restore(Target& target, int32_t configured, bool on) {
     if (!on) {
-        int32_t ignored = 0;
-        if (backlight_shared::turnOff(target.name, &ignored)) {
+        if (backlight_shared::turnOff(target.name)) {
             target.dimmed = false;
         }
         return;
@@ -62,7 +60,7 @@ void update(Target& target, bool enabled, bool idle, bool active, int32_t config
         restore(target, configured, on);
     } else if (!target.dimmed && enabled && idle) {
         target.previous = backlight_shared::BRIGHTNESS_UNSET;
-        if (backlight_shared::turnOff(target.name, &target.previous)) {
+        if (backlight_shared::turnOffAndGetPrevious(target.name, &target.previous)) {
             target.dimmed = true;
         }
     }

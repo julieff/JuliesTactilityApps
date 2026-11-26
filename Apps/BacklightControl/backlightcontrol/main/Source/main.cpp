@@ -137,11 +137,10 @@ void onPowerChanged(lv_event_t* event) {
             lv_obj_add_state(slider, LV_STATE_DISABLED);
         }
         const char* name = isDisplay ? backlight_shared::DISPLAY_BACKLIGHT_NAME : backlight_shared::KEYBOARD_BACKLIGHT_NAME;
-        int32_t ignored = 0;
         if (on) {
             backlight_shared::setBrightness(name, value);
         } else {
-            backlight_shared::turnOff(name, &ignored);
+            backlight_shared::turnOff(name);
         }
     }
     (isDisplay ? context->displayOn : context->keyboardOn).store(on);
@@ -335,8 +334,7 @@ void applySavedBacklight(const char* name, int32_t brightness, bool on, const ch
     if (on) {
         applied = brightness == BRIGHTNESS_UNSET || backlight_shared::setBrightness(name, brightness);
     } else {
-        int32_t ignored = 0;
-        applied = backlight_shared::turnOff(name, &ignored);
+        applied = backlight_shared::turnOff(name);
     }
     if (!applied) {
         LOG_E(TAG, "Could not apply saved %s backlight settings", label);

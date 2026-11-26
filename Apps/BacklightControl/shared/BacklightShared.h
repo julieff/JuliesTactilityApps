@@ -126,8 +126,19 @@ inline bool setBrightness(const char* name, int32_t brightness) {
     return ok;
 }
 
-/** Sets the minimum brightness (off) and reports the brightness it had before in @a out_previous. */
-inline bool turnOff(const char* name, int32_t* out_previous) {
+/** Sets the minimum brightness (off). */
+inline bool turnOff(const char* name) {
+    Device* device = acquireBacklight(name);
+    if (device == nullptr) {
+        return false;
+    }
+    const bool ok = backlight_set_brightness(device, backlight_get_min_brightness(device)) == ERROR_NONE;
+    device_put(device);
+    return ok;
+}
+
+/** Dims to minimum brightness and reports the prior brightness for later restoration. */
+inline bool turnOffAndGetPrevious(const char* name, int32_t* out_previous) {
     Device* device = acquireBacklight(name);
     if (device == nullptr) {
         return false;
