@@ -12,10 +12,11 @@
 #include <cstdio>
 #include <cstring>
 
-namespace backlight_shared {
+namespace tdeckmax_shared {
 
-constexpr const char* PACKAGE_ID = "tactility.backlightcontrol";
-constexpr const char* IDLE_APP_ID = "tactility.backlightcontrol.idle";
+constexpr const char* PACKAGE_ID = "tactility.tdeckmaxcontrol";
+constexpr const char* LEGACY_PACKAGE_ID = "tactility.backlightcontrol";
+constexpr const char* IDLE_APP_ID = "tactility.tdeckmaxcontrol.idle";
 constexpr const char* DISPLAY_BACKLIGHT_NAME = "display_backlight";
 constexpr const char* KEYBOARD_BACKLIGHT_NAME = "keyboard_backlight";
 
@@ -37,6 +38,10 @@ inline bool settingsPath(char* out, size_t size) {
     return app_paths_get_user_data_path(PACKAGE_ID, "settings.properties", out, size) == ERROR_NONE;
 }
 
+inline bool legacySettingsPath(char* out, size_t size) {
+    return app_paths_get_user_data_path(LEGACY_PACKAGE_ID, "settings.properties", out, size) == ERROR_NONE;
+}
+
 /** Performs file I/O: never call it on the LVGL thread. */
 inline Settings loadSettings() {
     Settings settings;
@@ -47,6 +52,16 @@ inline Settings loadSettings() {
     Preferences* prefs = preferences_open(path);
     if (prefs == nullptr) {
         return settings;
+    }
+    if (!preferences_has_int32(prefs, "timeout_seconds")) {
+        preferences_close(prefs);
+        if (!legacySettingsPath(path, sizeof(path))) {
+            return settings;
+        }
+        prefs = preferences_open(path);
+        if (prefs == nullptr) {
+            return settings;
+        }
     }
     preferences_opt_int32(prefs, "display_brightness", &settings.displayBrightness);
     preferences_opt_int32(prefs, "keyboard_brightness", &settings.keyboardBrightness);

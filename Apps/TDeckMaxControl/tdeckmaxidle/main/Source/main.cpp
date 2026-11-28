@@ -1,4 +1,4 @@
-#include "../../../shared/BacklightShared.h"
+#include "../../../shared/TDeckMaxShared.h"
 
 #include <app/event.h>
 
@@ -20,7 +20,7 @@ constexpr uint32_t WAKE_THRESHOLD_MS = 300;
 struct Target {
     const char* name;
     bool dimmed = false;
-    int32_t previous = backlight_shared::BRIGHTNESS_UNSET;
+    int32_t previous = tdeckmax_shared::BRIGHTNESS_UNSET;
 };
 
 uint32_t getInactiveMs() {
@@ -35,22 +35,22 @@ uint32_t getInactiveMs() {
 
 void apply(Target& target, int32_t brightness, bool on) {
     if (!on) {
-        backlight_shared::turnOff(target.name);
-    } else if (brightness != backlight_shared::BRIGHTNESS_UNSET) {
-        backlight_shared::setBrightness(target.name, brightness);
+        tdeckmax_shared::turnOff(target.name);
+    } else if (brightness != tdeckmax_shared::BRIGHTNESS_UNSET) {
+        tdeckmax_shared::setBrightness(target.name, brightness);
     }
 }
 
 void restore(Target& target, int32_t configured, bool on) {
     if (!on) {
-        if (backlight_shared::turnOff(target.name)) {
+        if (tdeckmax_shared::turnOff(target.name)) {
             target.dimmed = false;
         }
         return;
     }
-    const int32_t brightness = configured != backlight_shared::BRIGHTNESS_UNSET ? configured : target.previous;
-    if (brightness != backlight_shared::BRIGHTNESS_UNSET &&
-        backlight_shared::setBrightness(target.name, brightness)) {
+    const int32_t brightness = configured != tdeckmax_shared::BRIGHTNESS_UNSET ? configured : target.previous;
+    if (brightness != tdeckmax_shared::BRIGHTNESS_UNSET &&
+        tdeckmax_shared::setBrightness(target.name, brightness)) {
         target.dimmed = false;
     }
 }
@@ -59,8 +59,8 @@ void update(Target& target, bool enabled, bool idle, bool active, int32_t config
     if (target.dimmed && (!enabled || active)) {
         restore(target, configured, on);
     } else if (!target.dimmed && enabled && idle) {
-        target.previous = backlight_shared::BRIGHTNESS_UNSET;
-        if (backlight_shared::turnOffAndGetPrevious(target.name, &target.previous)) {
+        target.previous = tdeckmax_shared::BRIGHTNESS_UNSET;
+        if (tdeckmax_shared::turnOffAndGetPrevious(target.name, &target.previous)) {
             target.dimmed = true;
         }
     }
@@ -76,9 +76,9 @@ int main(int argc, char* argv[]) {
     AppEventSubscription subscription {};
     check(app_event_subscribe(&subscription, &eventGroup) == ERROR_NONE);
 
-    backlight_shared::Settings settings = backlight_shared::loadSettings();
-    Target display { backlight_shared::DISPLAY_BACKLIGHT_NAME };
-    Target keyboard { backlight_shared::KEYBOARD_BACKLIGHT_NAME };
+    tdeckmax_shared::Settings settings = tdeckmax_shared::loadSettings();
+    Target display { tdeckmax_shared::DISPLAY_BACKLIGHT_NAME };
+    Target keyboard { tdeckmax_shared::KEYBOARD_BACKLIGHT_NAME };
 
     apply(display, settings.displayBrightness, settings.displayOn);
     apply(keyboard, settings.keyboardBrightness, settings.keyboardOn);
@@ -103,7 +103,7 @@ int main(int argc, char* argv[]) {
 
         if (--ticksUntilReload <= 0) {
             ticksUntilReload = SETTINGS_RELOAD_TICKS;
-            const backlight_shared::Settings loaded = backlight_shared::loadSettings();
+            const tdeckmax_shared::Settings loaded = tdeckmax_shared::loadSettings();
             // A brightness picked in the settings app applies to a backlight that is on
             if (!display.dimmed && (loaded.displayBrightness != settings.displayBrightness ||
                                     loaded.displayOn != settings.displayOn)) {
@@ -131,7 +131,7 @@ int main(int argc, char* argv[]) {
     // The settings app turns the timeout off before it stops this service. A close while the timeout
     // is still enabled comes from the system (e.g. shutdown), so leave the backlights off instead of
     // lighting them up again.
-    settings = backlight_shared::loadSettings();
+    settings = tdeckmax_shared::loadSettings();
     if (settings.timeoutSeconds > 0) {
         apply(display, settings.displayBrightness, false);
         apply(keyboard, settings.keyboardBrightness, false);

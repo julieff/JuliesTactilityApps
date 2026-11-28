@@ -1,4 +1,4 @@
-#include "../../../shared/BacklightShared.h"
+#include "../../../shared/TDeckMaxShared.h"
 
 #include <app/event.h>
 #include <app/manager.h>
@@ -9,11 +9,15 @@
 #include <lvgl/lvgl.h>
 #include <lvgl/theme.h>
 #include <lvgl/widgets/card.h>
+#include <lvgl/widgets/tabs.h>
 #include <lvgl/widgets/toolbar.h>
 #include <lvgl_window_manager/window_manager.h>
 
 #include <tactility/check.h>
 #include <tactility/concurrent/task_event_group.h>
+#include <tactility/device.h>
+#include <tactility/drivers/radio.h>
+#include <tactility/error.h>
 #include <tactility/log.h>
 
 #include <freertos/FreeRTOS.h>
@@ -24,12 +28,14 @@
 
 namespace {
 
-using backlight_shared::BRIGHTNESS_UNSET;
+using tdeckmax_shared::BRIGHTNESS_UNSET;
 
-constexpr const char* TAG = "BacklightControl";
+constexpr const char* TAG = "TDeckMaxControl";
 constexpr TickType_t SAVE_DEBOUNCE = pdMS_TO_TICKS(400);
 constexpr int32_t TIMEOUT_VALUES[] = { 0, 10, 30, 60, 120, 300, 600 };
 constexpr const char* TIMEOUT_OPTIONS = "Off\n10 seconds\n30 seconds\n1 minute\n2 minutes\n5 minutes\n10 minutes";
+constexpr uint32_t EXTERNAL_ANTENNA = 0;
+constexpr uint32_t INTERNAL_ANTENNA = 1;
 
 struct BacklightInfo {
     bool available = false;
@@ -45,6 +51,8 @@ struct Context {
 
     BacklightInfo display;
     BacklightInfo keyboard;
+    bool antennaAvailable = false;
+    uint32_t antenna = EXTERNAL_ANTENNA;
 
     // Written by the LVGL thread and read by the app task
     std::atomic<int32_t> displayBrightness { BRIGHTNESS_UNSET };
@@ -64,11 +72,60 @@ struct Context {
     lv_obj_t* keyboardSwitch = nullptr;
     lv_obj_t* keyboardSlider = nullptr;
     lv_obj_t* keyboardLabel = nullptr;
+    lv_obj_t* tabs = nullptr;
+    lv_obj_t* backlightPage = nullptr;
+    lv_obj_t* antennaPage = nullptr;
+    lv_obj_t* antennaStatus = nullptr;
+    lv_obj_t* externalAntennaButton = nullptr;
+    lv_obj_t* internalAntennaButton = nullptr;
 };
+
+struct AntennaRadio {
+    Device* device = nullptr;
+    uint32_t antenna = EXTERNAL_ANTENNA;
+};
+
+bool findAntennaRadio(Device* device, void* userData) {
+    auto* found = static_cast<AntennaRadio*>(userData);
+    if (device_is_compatible(device, "semtech,sx1262")) {
+        found->device = device;
+        return false;
+    }
+    return true;
+}
+
+AntennaRadio acquireAntennaRadio() {
+    AntennaRadio radio;
+    device_for_each_of_type(&RADIO_TYPE, &radio, findAntennaRadio);
+    if (radio.device == nullptr || device_get(radio.device) != ERROR_NONE) {
+        radio.device = nullptr;
+        return radio;
+    }
+    if (!device_is_ready(radio.device) && device_start(radio.device) != ERROR_NONE) {
+        device_put(radio.device);
+        radio.device = nullptr;
+        return radio;
+    }
+    if (radio_get_antenna(radio.device, &radio.antenna) != ERROR_NONE) {
+        device_put(radio.device);
+        radio.device = nullptr;
+    }
+    return radio;
+}
+
+const char* antennaName(uint32_t antenna) {
+    if (antenna == EXTERNAL_ANTENNA) {
+        return "External";
+    }
+    if (antenna == INTERNAL_ANTENNA) {
+        return "Internal";
+    }
+    return "Unknown";
+}
 
 BacklightInfo probe(const char* name) {
     BacklightInfo info;
-    Device* device = backlight_shared::acquireBacklight(name);
+    Device* device = tdeckmax_shared::acquireBacklight(name);
     if (device == nullptr) {
         return info;
     }
@@ -111,11 +168,11 @@ void onSliderChanged(lv_event_t* event) {
     if (isDisplay) {
         context->displayBrightness.store(value);
         updateLabel(context->displayLabel, context->display, value);
-        backlight_shared::setBrightness(backlight_shared::DISPLAY_BACKLIGHT_NAME, value);
+        tdeckmax_shared::setBrightness(tdeckmax_shared::DISPLAY_BACKLIGHT_NAME, value);
     } else {
         context->keyboardBrightness.store(value);
         updateLabel(context->keyboardLabel, context->keyboard, value);
-        backlight_shared::setBrightness(backlight_shared::KEYBOARD_BACKLIGHT_NAME, value);
+        tdeckmax_shared::setBrightness(tdeckmax_shared::KEYBOARD_BACKLIGHT_NAME, value);
     }
     markDirty(context);
 }
@@ -136,11 +193,11 @@ void onPowerChanged(lv_event_t* event) {
         } else {
             lv_obj_add_state(slider, LV_STATE_DISABLED);
         }
-        const char* name = isDisplay ? backlight_shared::DISPLAY_BACKLIGHT_NAME : backlight_shared::KEYBOARD_BACKLIGHT_NAME;
+        const char* name = isDisplay ? tdeckmax_shared::DISPLAY_BACKLIGHT_NAME : tdeckmax_shared::KEYBOARD_BACKLIGHT_NAME;
         if (on) {
-            backlight_shared::setBrightness(name, value);
+            tdeckmax_shared::setBrightness(name, value);
         } else {
-            backlight_shared::turnOff(name);
+            tdeckmax_shared::turnOff(name);
         }
     }
     (isDisplay ? context->displayOn : context->keyboardOn).store(on);
@@ -164,6 +221,69 @@ void onIdleKeyboardChanged(lv_event_t* event) {
     auto* context = static_cast<Context*>(lv_event_get_user_data(event));
     context->idleKeyboard.store(lv_obj_has_state(lv_event_get_target_obj(event), LV_STATE_CHECKED));
     markDirty(context);
+}
+
+void updateAntennaSelection(Context* context) {
+    if (context->antennaStatus != nullptr) {
+        if (context->antennaAvailable) {
+            lv_label_set_text_fmt(context->antennaStatus, "Selected: %s antenna", antennaName(context->antenna));
+        } else {
+            lv_label_set_text(context->antennaStatus, "No configurable antenna switch found.");
+        }
+    }
+    if (context->externalAntennaButton != nullptr) {
+        lv_obj_set_state(context->externalAntennaButton, LV_STATE_CHECKED,
+                         context->antennaAvailable && context->antenna == EXTERNAL_ANTENNA);
+        lv_obj_set_state(context->externalAntennaButton, LV_STATE_DISABLED, !context->antennaAvailable);
+    }
+    if (context->internalAntennaButton != nullptr) {
+        lv_obj_set_state(context->internalAntennaButton, LV_STATE_CHECKED,
+                         context->antennaAvailable && context->antenna == INTERNAL_ANTENNA);
+        lv_obj_set_state(context->internalAntennaButton, LV_STATE_DISABLED, !context->antennaAvailable);
+    }
+}
+
+void onAntennaSelected(lv_event_t* event) {
+    auto* context = static_cast<Context*>(lv_event_get_user_data(event));
+    auto* button = lv_event_get_target_obj(event);
+    const uint32_t antenna =
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lv_obj_get_user_data(button)));
+    AntennaRadio radio = acquireAntennaRadio();
+    if (radio.device == nullptr) {
+        context->antennaAvailable = false;
+        updateAntennaSelection(context);
+        return;
+    }
+
+    context->antennaAvailable = true;
+    context->antenna = radio.antenna;
+    error_t error = ERROR_NONE;
+    if (radio.antenna != antenna) {
+        error = radio_set_antenna(radio.device, antenna);
+    }
+    device_put(radio.device);
+    if (error == ERROR_NONE) {
+        context->antenna = antenna;
+        updateAntennaSelection(context);
+        return;
+    }
+
+    updateAntennaSelection(context);
+    if (error == ERROR_INVALID_STATE && context->antennaStatus != nullptr) {
+        lv_label_set_text(context->antennaStatus, "Turn the radio off before switching antennas.");
+    } else if (error == ERROR_NOT_SUPPORTED && context->antennaStatus != nullptr) {
+        lv_label_set_text(context->antennaStatus, "Antenna switching is not supported.");
+    } else if (context->antennaStatus != nullptr) {
+        lv_label_set_text(context->antennaStatus, "Could not switch antennas.");
+    }
+    LOG_E(TAG, "Could not select antenna %u: %s", static_cast<unsigned>(antenna), error_to_string(error));
+}
+
+void onTabChanged(lv_event_t* event) {
+    auto* context = static_cast<Context*>(lv_event_get_user_data(event));
+    const bool showBacklight = lvgl_tabs_get_selected(context->tabs) == 0;
+    lv_obj_set_hidden(context->backlightPage, !showBacklight);
+    lv_obj_set_hidden(context->antennaPage, showBacklight);
 }
 
 lv_obj_t* createCard(lv_obj_t* parent, const char* title) {
@@ -239,6 +359,29 @@ lv_obj_t* createSwitchRow(lv_obj_t* parent, const char* text, bool checked, lv_e
     return toggle;
 }
 
+lv_obj_t* createPage(lv_obj_t* parent, bool visible, lv_coord_t padding) {
+    auto* page = lv_obj_create(parent);
+    lv_obj_set_size(page, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(page, 1);
+    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(page, padding, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_gap(page, padding, LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(page, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, LV_STATE_DEFAULT);
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    lv_obj_set_hidden(page, !visible);
+    return page;
+}
+
+lv_obj_t* createAntennaButton(lv_obj_t* parent, Context* context, const char* label, uint32_t antenna) {
+    auto* button = lv_button_create(parent);
+    lv_obj_set_flex_grow(button, 1);
+    lv_obj_set_user_data(button, reinterpret_cast<void*>(static_cast<uintptr_t>(antenna)));
+    lv_obj_add_event_cb(button, onAntennaSelected, LV_EVENT_SHORT_CLICKED, context);
+    lv_label_set_text(lv_label_create(button), label);
+    return button;
+}
+
 void createWidgets(lv_obj_t* parent, void* userData) {
     auto* context = static_cast<Context*>(userData);
     const lv_coord_t padding = lvgl_get_ui_density() == LVGL_UI_DENSITY_COMPACT ? 6 : 10;
@@ -246,28 +389,37 @@ void createWidgets(lv_obj_t* parent, void* userData) {
     lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollable(parent, false);
 
-    auto* toolbar = lvgl_toolbar_create(parent, "Backlight");
+    auto* toolbar = lvgl_toolbar_create(parent, "T-Deck Max Control");
     lvgl_toolbar_set_nav_action(toolbar, LV_SYMBOL_CLOSE, onClosePressed, context);
 
     auto* content = lv_obj_create(parent);
     lv_obj_set_width(content, LV_PCT(100));
     lv_obj_set_flex_grow(content, 1);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(content, padding, LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_gap(content, padding, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(content, 0, LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(content, 0, LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, LV_STATE_DEFAULT);
-    lv_obj_set_scroll_dir(content, LV_DIR_VER);
+    lv_obj_set_scrollable(content, false);
+
+    context->tabs = lvgl_tabs_create(content);
+    lvgl_tabs_set_mode(context->tabs, LVGL_TABS_MODE_WRAP);
+    lvgl_tabs_add_tab(context->tabs, "Backlight");
+    lvgl_tabs_add_tab(context->tabs, "Antenna");
+    lvgl_tabs_set_selected(context->tabs, 0);
+    lv_obj_add_event_cb(context->tabs, onTabChanged, LV_EVENT_VALUE_CHANGED, context);
+
+    context->backlightPage = createPage(content, true, padding);
+    context->antennaPage = createPage(content, false, padding);
 
     // The display slider can't reach its minimum, which would turn the screen off with no way back
-    createBacklightCard(content, context, "Display backlight", context->display, context->displayBrightness.load(),
-                        context->display.min + 1, context->displayOn.load(), &context->displaySlider,
-                        &context->displayLabel, &context->displaySwitch);
-    createBacklightCard(content, context, "Keyboard backlight", context->keyboard, context->keyboardBrightness.load(),
-                        context->keyboard.min, context->keyboardOn.load(), &context->keyboardSlider,
-                        &context->keyboardLabel, &context->keyboardSwitch);
+    createBacklightCard(context->backlightPage, context, "Display backlight", context->display,
+                        context->displayBrightness.load(), context->display.min + 1, context->displayOn.load(),
+                        &context->displaySlider, &context->displayLabel, &context->displaySwitch);
+    createBacklightCard(context->backlightPage, context, "Keyboard backlight", context->keyboard,
+                        context->keyboardBrightness.load(), context->keyboard.min, context->keyboardOn.load(),
+                        &context->keyboardSlider, &context->keyboardLabel, &context->keyboardSwitch);
 
-    auto* idleCard = createCard(content, "Turn off after inactivity");
+    auto* idleCard = createCard(context->backlightPage, "Turn off after inactivity");
     auto* timeout = lv_dropdown_create(idleCard);
     lv_dropdown_set_options(timeout, TIMEOUT_OPTIONS);
     uint32_t selected = 0;
@@ -286,6 +438,19 @@ void createWidgets(lv_obj_t* parent, void* userData) {
     lv_obj_set_width(hint, LV_PCT(100));
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
     lv_label_set_text(hint, "Runs in the background. Touch or press a key to turn the backlight back on.");
+
+    auto* antennaCard = createCard(context->antennaPage, "LoRa antenna");
+    auto* antennaRow = createRow(antennaCard);
+    context->externalAntennaButton = createAntennaButton(antennaRow, context, "External", EXTERNAL_ANTENNA);
+    context->internalAntennaButton = createAntennaButton(antennaRow, context, "Internal", INTERNAL_ANTENNA);
+    context->antennaStatus = lv_label_create(antennaCard);
+    lv_obj_set_width(context->antennaStatus, LV_PCT(100));
+    lv_label_set_long_mode(context->antennaStatus, LV_LABEL_LONG_WRAP);
+    updateAntennaSelection(context);
+    auto* antennaHint = lv_label_create(antennaCard);
+    lv_obj_set_width(antennaHint, LV_PCT(100));
+    lv_label_set_long_mode(antennaHint, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(antennaHint, "The radio must be off to change antennas.");
 }
 
 void destroyWidgets(void* userData) {
@@ -296,14 +461,20 @@ void destroyWidgets(void* userData) {
     context->keyboardSwitch = nullptr;
     context->keyboardSlider = nullptr;
     context->keyboardLabel = nullptr;
+    context->tabs = nullptr;
+    context->backlightPage = nullptr;
+    context->antennaPage = nullptr;
+    context->antennaStatus = nullptr;
+    context->externalAntennaButton = nullptr;
+    context->internalAntennaButton = nullptr;
 }
 
 void syncIdleService(int32_t timeoutSeconds) {
     AppInstanceId instance = 0;
-    const bool running = app_manager_find_running_instance(backlight_shared::IDLE_APP_ID, &instance) == ERROR_NONE;
+    const bool running = app_manager_find_running_instance(tdeckmax_shared::IDLE_APP_ID, &instance) == ERROR_NONE;
     if (timeoutSeconds > 0 && !running) {
         AppStartContext start {};
-        if (app_start_context_from_id(backlight_shared::IDLE_APP_ID, &start) != ERROR_NONE ||
+        if (app_start_context_from_id(tdeckmax_shared::IDLE_APP_ID, &start) != ERROR_NONE ||
             app_start_with_context(&start, &instance) != ERROR_NONE) {
             LOG_E(TAG, "Could not start the idle service");
         }
@@ -313,7 +484,7 @@ void syncIdleService(int32_t timeoutSeconds) {
 }
 
 bool save(Context* context) {
-    backlight_shared::Settings settings;
+    tdeckmax_shared::Settings settings;
     settings.displayBrightness = context->displayBrightness.load();
     settings.keyboardBrightness = context->keyboardBrightness.load();
     settings.timeoutSeconds = context->timeoutSeconds.load();
@@ -321,7 +492,7 @@ bool save(Context* context) {
     settings.keyboardOn = context->keyboardOn.load();
     settings.idleDisplay = context->idleDisplay.load();
     settings.idleKeyboard = context->idleKeyboard.load();
-    if (!backlight_shared::saveSettings(settings)) {
+    if (!tdeckmax_shared::saveSettings(settings)) {
         LOG_E(TAG, "Could not save settings");
         return false;
     }
@@ -332,9 +503,9 @@ bool save(Context* context) {
 void applySavedBacklight(const char* name, int32_t brightness, bool on, const char* label) {
     bool applied = false;
     if (on) {
-        applied = brightness == BRIGHTNESS_UNSET || backlight_shared::setBrightness(name, brightness);
+        applied = brightness == BRIGHTNESS_UNSET || tdeckmax_shared::setBrightness(name, brightness);
     } else {
-        applied = backlight_shared::turnOff(name);
+        applied = tdeckmax_shared::turnOff(name);
     }
     if (!applied) {
         LOG_E(TAG, "Could not apply saved %s backlight settings", label);
@@ -354,7 +525,7 @@ int main(int argc, char* argv[]) {
     AppEventSubscription subscription {};
     check(app_event_subscribe(&subscription, &context.eventGroup) == ERROR_NONE);
 
-    const backlight_shared::Settings settings = backlight_shared::loadSettings();
+    const tdeckmax_shared::Settings settings = tdeckmax_shared::loadSettings();
     context.displayBrightness.store(settings.displayBrightness);
     context.keyboardBrightness.store(settings.keyboardBrightness);
     context.timeoutSeconds.store(settings.timeoutSeconds);
@@ -362,11 +533,17 @@ int main(int argc, char* argv[]) {
     context.keyboardOn.store(settings.keyboardOn);
     context.idleDisplay.store(settings.idleDisplay);
     context.idleKeyboard.store(settings.idleKeyboard);
-    context.display = probe(backlight_shared::DISPLAY_BACKLIGHT_NAME);
-    context.keyboard = probe(backlight_shared::KEYBOARD_BACKLIGHT_NAME);
-    applySavedBacklight(backlight_shared::DISPLAY_BACKLIGHT_NAME, settings.displayBrightness, settings.displayOn,
+    context.display = probe(tdeckmax_shared::DISPLAY_BACKLIGHT_NAME);
+    context.keyboard = probe(tdeckmax_shared::KEYBOARD_BACKLIGHT_NAME);
+    AntennaRadio antennaRadio = acquireAntennaRadio();
+    if (antennaRadio.device != nullptr) {
+        context.antennaAvailable = true;
+        context.antenna = antennaRadio.antenna;
+        device_put(antennaRadio.device);
+    }
+    applySavedBacklight(tdeckmax_shared::DISPLAY_BACKLIGHT_NAME, settings.displayBrightness, settings.displayOn,
                         "display");
-    applySavedBacklight(backlight_shared::KEYBOARD_BACKLIGHT_NAME, settings.keyboardBrightness, settings.keyboardOn,
+    applySavedBacklight(tdeckmax_shared::KEYBOARD_BACKLIGHT_NAME, settings.keyboardBrightness, settings.keyboardOn,
                         "keyboard");
     syncIdleService(settings.timeoutSeconds);
 
